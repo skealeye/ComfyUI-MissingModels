@@ -44,3 +44,35 @@ def test_collect_tolerates_odd_input():
     assert core.collect({}) == []
     assert core.collect({"nodes": [None, "x", {"type": "VAELoader", "widgets_values": {"vae_name": "v.safetensors"}}]}) == [
         {"name": "v.safetensors", "directory": "vae", "url": None}]
+
+
+HF = "https://huggingface.co/o/r/resolve/main/"
+
+
+def test_allowed():
+    assert core.allowed(HF + "x.safetensors")
+    for bad in (None, "", "http://huggingface.co/x", "https://huggingface.co.evil.com/x", "https://civitai.com/x"):
+        assert not core.allowed(bad)
+
+
+def test_safe_name():
+    assert core.safe_name("x.safetensors") == "x.safetensors"
+    assert core.safe_name(r"ltxv\ltx2\x.safetensors") == "ltxv/ltx2/x.safetensors"   # subfolder kept
+    for bad in ("../x.safetensors", "a/../../x.safetensors", "/etc/x.safetensors", "C:/x.safetensors",
+                "C:x.safetensors", "x.exe", "", "a//x.safetensors"):
+        with pytest.raises(ValueError, match="unsafe"):
+            core.safe_name(bad)
+
+
+def test_missing_rows():
+    entries = [{"name": "have.safetensors", "directory": "loras", "url": HF + "have.safetensors"},
+               {"name": "get.safetensors", "directory": "loras", "url": HF + "get.safetensors"},
+               {"name": "nolink.safetensors", "directory": "vae", "url": None},
+               {"name": "odd.safetensors", "directory": "mystery", "url": HF + "odd.safetensors"},
+               {"name": "civ.safetensors", "directory": "loras", "url": "https://civitai.com/api/download/1"},
+               {"name": "../x.safetensors", "directory": "loras", "url": HF + "x.safetensors"}]
+    rows = core.missing(entries, lambda d, n: n == "have.safetensors", {"loras", "vae"})
+    assert [(r["name"], r["downloadable"], r["reason"]) for r in rows] == [
+        ("get.safetensors", True, ""), ("nolink.safetensors", False, "not found"),
+        ("odd.safetensors", False, "unknown folder"), ("civ.safetensors", False, "unsupported source"),
+        ("../x.safetensors", False, "unsafe file name")]

@@ -39,3 +39,44 @@ def collect(workflow: dict) -> list[dict]:
                 if isinstance(v, str) and v.lower().endswith(MODEL_EXTS):
                     found.setdefault((folder, v), {"name": v, "directory": folder, "url": None})
     return list(found.values())
+
+
+HF_PREFIX = "https://huggingface.co/"
+
+
+def allowed(url) -> bool:
+    return isinstance(url, str) and url.startswith(HF_PREFIX)
+
+
+def safe_name(name: str) -> str:
+    """A model file name relative to its folder (subfolders allowed), or ValueError."""
+    n = (name or "").replace("\\", "/")
+    parts = n.split("/")
+    if (not n or n.startswith("/") or ":" in n or any(p in ("", ".", "..") for p in parts)
+            or not n.lower().endswith(MODEL_EXTS)):
+        raise ValueError("unsafe file name")
+    return n
+
+
+def missing(entries: list[dict], exists, known_dirs: set[str]) -> list[dict]:
+    """The entries ComfyUI doesn't have, each with downloadable + reason."""
+    out = []
+    for e in entries:
+        known = e["directory"] in known_dirs
+        if known and exists(e["directory"], e["name"]):
+            continue
+        row = dict(e, downloadable=False, reason="")
+        if not known:
+            row["reason"] = "unknown folder"
+        elif not e.get("url"):
+            row["reason"] = "not found"
+        elif not allowed(e["url"]):
+            row["reason"] = "unsupported source"
+        else:
+            try:
+                safe_name(e["name"])
+                row["downloadable"] = True
+            except ValueError:
+                row["reason"] = "unsafe file name"
+        out.append(row)
+    return out
