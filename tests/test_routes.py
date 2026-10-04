@@ -71,7 +71,9 @@ def test_check_lists_only_missing(pkg):
 
 
 def test_check_odd_input_is_empty(pkg):
-    for body in ({}, {"workflow": None}, {"workflow": []}, ValueError("not json")):
+    for body in ({}, {"workflow": None}, {"workflow": []}, ValueError("not json"), {"workflow": {"nodes": 5}},
+                 {"workflow": {"nodes": [{"type": "X", "properties": {"models": [{"name": 5, "directory": "loras",
+                                                                              "url": HF}]}}]}}):
         assert call(pkg.check, body) == (200, {"missing": []})
 
 

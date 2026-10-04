@@ -2,6 +2,7 @@
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -17,30 +18,42 @@ LOADER_FOLDERS = {
 }
 
 
+def _list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
+def _dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
 def _nodes(workflow: dict):
-    yield from workflow.get("nodes") or []
-    for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
-        if isinstance(sg, dict):
-            yield from sg.get("nodes") or []
+    yield from _list(workflow.get("nodes"))
+    for sg in _list(_dict(workflow.get("definitions")).get("subgraphs")):
+        yield from _list(_dict(sg).get("nodes"))
 
 
 def collect(workflow: dict) -> list[dict]:
     """Model files a workflow uses: templates' per-node download links (properties.models) and the file names in
-    known loader nodes. One entry per (directory, name); an entry with a link wins over one without."""
+    known loader nodes. One entry per (directory, name); an entry with a link wins over one without. Names use /
+    (Windows widgets store subfolders with \\). Anything malformed is skipped."""
     found: dict[tuple[str, str], dict] = {}
-    for n in _nodes(workflow if isinstance(workflow, dict) else {}):
+    for n in _nodes(_dict(workflow)):
         if not isinstance(n, dict):
             continue
-        for m in (n.get("properties") or {}).get("models") or []:
-            if isinstance(m, dict) and m.get("name") and m.get("directory"):
-                found[(m["directory"], m["name"])] = {"name": m["name"], "directory": m["directory"],
-                                                      "url": m.get("url") or None}
-        folder = LOADER_FOLDERS.get(n.get("type"))
+        for m in _list(_dict(n.get("properties")).get("models")):
+            m = _dict(m)
+            name, directory, url = m.get("name"), m.get("directory"), m.get("url")
+            if isinstance(name, str) and name and isinstance(directory, str) and directory:
+                name = name.replace("\\", "/")
+                found[(directory, name)] = {"name": name, "directory": directory,
+                                            "url": url if isinstance(url, str) and url else None}
+        folder = LOADER_FOLDERS.get(n.get("type")) if isinstance(n.get("type"), str) else None
         if folder:
             values = n.get("widgets_values")
-            values = values.values() if isinstance(values, dict) else values or []
+            values = list(values.values()) if isinstance(values, dict) else _list(values)
             for v in values:
                 if isinstance(v, str) and v.lower().endswith(MODEL_EXTS):
+                    v = v.replace("\\", "/")
                     found.setdefault((folder, v), {"name": v, "directory": folder, "url": None})
     return list(found.values())
 
@@ -105,6 +118,7 @@ def token(config_path=ROOT / "config.json") -> str | None:
         cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cfg = {}
+    cfg = _dict(cfg)
     try:
         return Path(cfg.get("hf_token_file") or DEFAULT_TOKEN_FILE).read_text(encoding="utf-8").strip() or None
     except OSError:
@@ -114,6 +128,27 @@ def token(config_path=ROOT / "config.json") -> str | None:
 def repo_page(url: str) -> str:
     parts = url.split("/")
     return "/".join(parts[:5])          # https://huggingface.co/<owner>/<repo>
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow https redirects only, and send the token to huggingface.co only (not to its CDN or anywhere else):
+    urllib's default handler copies the Authorization header to every redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlsplit(newurl)
+        if target.scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, f"refused redirect to {target.scheme}", headers, fp)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and target.hostname != "huggingface.co":
+            new.remove_header("Authorization")
+        return new
+
+
+_OPENER = urllib.request.build_opener(_SafeRedirect)
+
+
+def _open(req, timeout=60):
+    return _OPENER.open(req, timeout=timeout)
 
 
 def _request(url: str, tok: str | None, method: str = "GET") -> urllib.request.Request:
@@ -126,7 +161,7 @@ def _request(url: str, tok: str | None, method: str = "GET") -> urllib.request.R
 def size(url: str, tok: str | None = None) -> int | None:
     """File size from a HEAD request (Hugging Face's X-Linked-Size, else Content-Length); None if unknown."""
     try:
-        with urllib.request.urlopen(_request(url, tok, "HEAD"), timeout=30) as r:
+        with _open(_request(url, tok, "HEAD"), timeout=30) as r:
             v = r.headers.get("X-Linked-Size") or r.headers.get("Content-Length")
             return int(v) if v else None
     except (OSError, ValueError):
@@ -140,7 +175,7 @@ def download(url: str, dest, tok: str | None = None, progress=None, cancel=None)
         raise FileExistsError(f"{dest.name} already exists")
     part = dest.with_name(dest.name + ".part")
     try:
-        with urllib.request.urlopen(_request(url, tok), timeout=60) as r:
+        with _open(_request(url, tok), timeout=60) as r:
             total, done = int(r.headers.get("Content-Length") or 0), 0
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(part, "wb") as f:
@@ -151,6 +186,8 @@ def download(url: str, dest, tok: str | None = None, progress=None, cancel=None)
                     done += len(chunk)
                     if progress:
                         progress(done, total)
+            if total and done != total:   # urllib stops quietly when the connection drops early
+                raise RuntimeError(f"incomplete download ({done:,} of {total:,} bytes); try again")
     except urllib.error.HTTPError as e:
         part.unlink(missing_ok=True)
         if e.code in (401, 403):

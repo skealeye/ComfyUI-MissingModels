@@ -26,8 +26,15 @@ class Downloader:
         return True
 
     def _run(self, items: list[dict]):
-        tok, results = self.token(), []
+        results = []
+        try:
+            tok = self.token()
+        except Exception:   # an unreadable config must not kill the batch (the dialog waits for "done")
+            tok = None
         for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                results.append({"name": None, "directory": None, "status": "failed", "error": "bad item"})
+                continue
             r = {"name": it.get("name"), "directory": it.get("directory")}
             if self.cancel.is_set():
                 results.append(dict(r, status="cancelled"))

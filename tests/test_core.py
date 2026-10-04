@@ -113,7 +113,7 @@ def test_download_part_then_rename_with_progress_and_token(tmp_path, monkeypatch
     def fake(req, timeout=60):
         seen["auth"] = req.get_header("Authorization")
         return Resp(b"x" * 3_000_000)
-    monkeypatch.setattr(core.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(core, "_open", fake)
     got = []
     dest = tmp_path / "sub" / "m.safetensors"
     assert core.download(HF + "m.safetensors", dest, "tok", lambda d, t: got.append((d, t))) == dest
@@ -124,7 +124,7 @@ def test_download_part_then_rename_with_progress_and_token(tmp_path, monkeypatch
 
 
 def test_download_never_overwrites(tmp_path, monkeypatch):
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout=60: Resp(b"new"))
+    monkeypatch.setattr(core, "_open", lambda req, timeout=60: Resp(b"new"))
     dest = tmp_path / "m.safetensors"
     dest.write_bytes(b"old")
     with pytest.raises(FileExistsError, match="already exists"):
@@ -141,14 +141,14 @@ def test_download_keeps_a_file_that_appeared_meanwhile(tmp_path, monkeypatch):
             if chunk and not dest.exists():
                 dest.write_bytes(b"copied in by hand")     # user copies the file in mid-download
             return chunk
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout=60: Racing(b"x" * 100))
+    monkeypatch.setattr(core, "_open", lambda req, timeout=60: Racing(b"x" * 100))
     with pytest.raises(FileExistsError):
         core.download(HF + "m.safetensors", dest)
     assert dest.read_bytes() == b"copied in by hand" and not (tmp_path / "m.safetensors.part").exists()
 
 
 def test_download_cancel_removes_part(tmp_path, monkeypatch):
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout=60: Resp(b"x" * 5_000_000))
+    monkeypatch.setattr(core, "_open", lambda req, timeout=60: Resp(b"x" * 5_000_000))
     stop = threading.Event()
     dest = tmp_path / "m.safetensors"
     with pytest.raises(core.Cancelled):
@@ -159,18 +159,18 @@ def test_download_cancel_removes_part(tmp_path, monkeypatch):
 def test_download_gated(tmp_path, monkeypatch):
     def refuse(req, timeout=60):
         raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b""))
-    monkeypatch.setattr(core.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(core, "_open", refuse)
     with pytest.raises(core.GatedError, match=r"Accept the license at https://huggingface.co/o/r, then try again"):
         core.download(HF + "m.safetensors", tmp_path / "m.safetensors")
     assert list(tmp_path.iterdir()) == []
 
 
 def test_size(monkeypatch):
-    monkeypatch.setattr(core.urllib.request, "urlopen",
+    monkeypatch.setattr(core, "_open",
                         lambda req, timeout=30: Resp(b"", {"X-Linked-Size": "123", "Content-Length": "9"}))
     assert core.size(HF + "m.safetensors") == 123
 
     def boom(req, timeout=30):
         raise OSError("offline")
-    monkeypatch.setattr(core.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(core, "_open", boom)
     assert core.size(HF + "m.safetensors") is None

@@ -43,8 +43,12 @@ async def _body(request) -> dict:
 @routes.post("/missing_models/check")
 async def check(request):
     wf = (await _body(request)).get("workflow")
-    rows = core.missing(core.collect(wf if isinstance(wf, dict) else {}), exists,
-                        set(folder_paths.folder_names_and_paths))
+    try:
+        rows = core.missing(core.collect(wf if isinstance(wf, dict) else {}), exists,
+                            set(folder_paths.folder_names_and_paths))
+    except Exception as e:   # an odd workflow must never break loading it in ComfyUI
+        print(f"[MissingModels] check failed: {e}")
+        rows = []
     tok, loop = core.token(), asyncio.get_running_loop()
     for r in rows:
         r["size"] = await loop.run_in_executor(None, core.size, r["url"], tok) if r["downloadable"] else None
