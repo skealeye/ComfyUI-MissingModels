@@ -1,4 +1,8 @@
 """Pure logic for the Missing models extension (no ComfyUI imports, so it can be unit-tested)."""
+import json
+import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -80,3 +84,83 @@ def missing(entries: list[dict], exists, known_dirs: set[str]) -> list[dict]:
                 row["reason"] = "unsafe file name"
         out.append(row)
     return out
+
+
+DEFAULT_TOKEN_FILE = r"Z:\Git\SlopFactory\.hf_token"
+
+
+class GatedError(RuntimeError):
+    pass
+
+
+class Cancelled(RuntimeError):
+    pass
+
+
+def token(config_path=ROOT / "config.json") -> str | None:
+    """Hugging Face token: env HF_TOKEN, else the file config.json names (never logged or sent to the browser)."""
+    if os.environ.get("HF_TOKEN"):
+        return os.environ["HF_TOKEN"].strip()
+    try:
+        cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    try:
+        return Path(cfg.get("hf_token_file") or DEFAULT_TOKEN_FILE).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def repo_page(url: str) -> str:
+    parts = url.split("/")
+    return "/".join(parts[:5])          # https://huggingface.co/<owner>/<repo>
+
+
+def _request(url: str, tok: str | None, method: str = "GET") -> urllib.request.Request:
+    req = urllib.request.Request(url, method=method, headers={"User-Agent": "ComfyUI-MissingModels"})
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    return req
+
+
+def size(url: str, tok: str | None = None) -> int | None:
+    """File size from a HEAD request (Hugging Face's X-Linked-Size, else Content-Length); None if unknown."""
+    try:
+        with urllib.request.urlopen(_request(url, tok, "HEAD"), timeout=30) as r:
+            v = r.headers.get("X-Linked-Size") or r.headers.get("Content-Length")
+            return int(v) if v else None
+    except (OSError, ValueError):
+        return None
+
+
+def download(url: str, dest, tok: str | None = None, progress=None, cancel=None) -> Path:
+    """url -> dest via dest.part. progress(done, total); cancel: threading.Event. Never overwrites dest."""
+    dest = Path(dest)
+    if dest.exists():
+        raise FileExistsError(f"{dest.name} already exists")
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(_request(url, tok), timeout=60) as r:
+            total, done = int(r.headers.get("Content-Length") or 0), 0
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(part, "wb") as f:
+                while chunk := r.read(1 << 20):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled("cancelled")
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+    except urllib.error.HTTPError as e:
+        part.unlink(missing_ok=True)
+        if e.code in (401, 403):
+            raise GatedError(f"Accept the license at {repo_page(url)}, then try again") from None
+        raise RuntimeError(f"HTTP {e.code} {e.reason}") from None
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    if dest.exists():                    # appeared while downloading (copied in by hand): keep it
+        part.unlink(missing_ok=True)
+        raise FileExistsError(f"{dest.name} already exists")
+    part.replace(dest)
+    return dest
