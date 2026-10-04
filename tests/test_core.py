@@ -6,7 +6,9 @@ import urllib.error
 import pytest
 
 import core
-from conftest import FIXTURES
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def test_collect_real_template():
