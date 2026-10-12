@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 config.json
 hf_token.txt
+civitai_token.txt
 .superpowers/
 docs/superpowers/

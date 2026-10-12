@@ -1,6 +1,7 @@
 @echo off
 rem ComfyUI Missing Models installer (Windows). Double-click it; it can run on its own, no clone needed.
-rem It finds ComfyUI, installs or updates this extension in custom_nodes, and can save a Hugging Face token.
+rem It finds ComfyUI, installs or updates this extension in custom_nodes, and can save a Hugging Face token
+rem and a Civitai API key.
 setlocal EnableExtensions EnableDelayedExpansion
 title ComfyUI Missing Models - installer
 
@@ -98,7 +99,7 @@ powershell -NoProfile -Command "$ProgressPreference='SilentlyContinue'; try { In
 set "SRC="
 for /d %%d in ("!TMPD!\%NAME%*") do set "SRC=%%d"
 if not defined SRC goto failed
-rem copies over the old files; your hf_token.txt and config.json are not in the zip, so they stay
+rem copies over the old files; your token files and config.json are not in the zip, so they stay
 robocopy "!SRC!" "!DEST!" /E /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 goto failed
 rmdir /s /q "!TMPD!" >nul 2>&1
@@ -111,11 +112,11 @@ echo    !DEST!
 echo.
 if defined HF_TOKEN (
   echo  Your HF_TOKEN environment variable is set: gated models will use it.
-  goto done
+  goto civitai
 )
 if exist "!DEST!\hf_token.txt" (
   echo  A Hugging Face token is already saved in hf_token.txt.
-  goto done
+  goto civitai
 )
 echo  Most models download without an account. Some ^(for example FLUX.1-dev^) are
 echo  "gated": they need a free Hugging Face account, a click on "Agree" on the
@@ -125,7 +126,7 @@ set "ANS="
 set /p "ANS=  Add a Hugging Face token now? [y/N]: "
 if /i not "!ANS!"=="y" if /i not "!ANS!"=="yes" (
   echo  Skipped. You can run this installer again later to add one.
-  goto done
+  goto civitai
 )
 echo.
 echo  1. Open https://huggingface.co/settings/tokens
@@ -135,11 +136,45 @@ set "TOK="
 set /p "TOK=  Paste the token: "
 if not defined TOK (
   echo  No token entered: skipped.
-  goto done
+  goto civitai
 )
 set "TOK=!TOK: =!"
 >"!DEST!\hf_token.txt" echo(!TOK!
 echo  Saved to hf_token.txt ^(stays on this PC; only ever sent to huggingface.co^).
+
+rem ---- 4. optional Civitai API key --------------------------------------------------------------
+:civitai
+echo.
+if defined CIVITAI_API_TOKEN (
+  echo  Your CIVITAI_API_TOKEN environment variable is set: Civitai downloads will use it.
+  goto done
+)
+if exist "!DEST!\civitai_token.txt" (
+  echo  A Civitai API key is already saved in civitai_token.txt.
+  goto done
+)
+echo  The extension can also find and download models from Civitai. Many work
+echo  without an account; some need a free Civitai account and an API key.
+echo.
+set "ANS="
+set /p "ANS=  Add a Civitai API key now? [y/N]: "
+if /i not "!ANS!"=="y" if /i not "!ANS!"=="yes" (
+  echo  Skipped. You can run this installer again later to add one.
+  goto done
+)
+echo.
+echo  1. Open https://civitai.com/user/account
+echo  2. Under "API Keys", click "Add API key", name it, and copy the key
+echo.
+set "TOK="
+set /p "TOK=  Paste the key: "
+if not defined TOK (
+  echo  No key entered: skipped.
+  goto done
+)
+set "TOK=!TOK: =!"
+>"!DEST!\civitai_token.txt" echo(!TOK!
+echo  Saved to civitai_token.txt ^(stays on this PC; only ever sent to civitai.com^).
 
 :done
 echo.

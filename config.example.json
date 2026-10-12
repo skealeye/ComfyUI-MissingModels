@@ -1,1 +1,4 @@
-{"hf_token_file": "C:\\path\\to\\hf_token.txt"}
+{
+  "hf_token_file": "C:\\path\\to\\hf_token.txt",
+  "civitai_token_file": "C:\\path\\to\\civitai_token.txt"
+}

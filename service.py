@@ -9,8 +9,8 @@ except ImportError:
 
 
 class Downloader:
-    def __init__(self, emit, dest_for, token=core.token):
-        self.emit, self.dest_for, self.token = emit, dest_for, token
+    def __init__(self, emit, dest_for, token=core.token, civitai_token=core.civitai_token):
+        self.emit, self.dest_for, self.token, self.civitai_token = emit, dest_for, token, civitai_token
         self.cancel = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -27,10 +27,12 @@ class Downloader:
 
     def _run(self, items: list[dict]):
         results = []
-        try:
-            tok = self.token()
-        except Exception:   # an unreadable config must not kill the batch (the dialog waits for "done")
-            tok = None
+        tokens = []
+        for read in (self.token, self.civitai_token):
+            try:
+                tokens.append(read())
+            except Exception:   # an unreadable config must not kill the batch (the dialog waits for "done")
+                tokens.append(None)
         for i, it in enumerate(items):
             if not isinstance(it, dict):
                 results.append({"name": None, "directory": None, "status": "failed", "error": "bad item"})
@@ -52,7 +54,7 @@ class Downloader:
                         last[0] = now
                         self.emit("missing_models.progress",
                                   {"index": i, "count": len(items), "name": name, "done": done, "total": total})
-                core.download(it["url"], dest, tok, progress, self.cancel)
+                core.download(it["url"], dest, core.token_for(it["url"], *tokens), progress, self.cancel)
                 results.append(dict(r, status="installed", path=str(dest)))
             except core.Cancelled:
                 results.append(dict(r, status="cancelled"))

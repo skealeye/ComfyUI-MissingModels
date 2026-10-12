@@ -49,10 +49,47 @@ async def check(request):
     except Exception as e:   # an odd workflow must never break loading it in ComfyUI
         print(f"[MissingModels] check failed: {e}")
         rows = []
-    tok, loop = core.token(), asyncio.get_running_loop()
+    tokens, loop = (core.token(), core.civitai_token()), asyncio.get_running_loop()
     for r in rows:
-        r["size"] = await loop.run_in_executor(None, core.size, r["url"], tok) if r["downloadable"] else None
+        r["size"] = (await loop.run_in_executor(None, core.size, r["url"], core.token_for(r["url"], *tokens))
+                     if r["downloadable"] else None)
     return web.json_response({"missing": rows})
+
+
+@routes.post("/missing_models/civitai/find")
+async def civitai_find(request):
+    """Look each file up on Civitai by its exact name: {found: {...}} or {found: null}, or {error}."""
+    items = (await _body(request)).get("items")
+    if not isinstance(items, list):
+        return web.json_response({"error": "items must be a list"}, status=400)
+    tok, loop = core.civitai_token(), asyncio.get_running_loop()
+
+    async def one(it):
+        it = it if isinstance(it, dict) else {}
+        name, directory = it.get("name"), it.get("directory")
+        if not (isinstance(name, str) and isinstance(directory, str)):
+            return {"name": name, "directory": directory, "error": "bad item"}
+        try:
+            found = await loop.run_in_executor(None, core.civitai_find, name, directory, tok)
+            return {"name": name, "directory": directory, "found": found}
+        except Exception as e:
+            return {"name": name, "directory": directory, "error": str(e)}
+    return web.json_response({"results": await asyncio.gather(*(one(it) for it in items[:50]))})
+
+
+@routes.post("/missing_models/civitai/resolve")
+async def civitai_resolve(request):
+    """A Civitai link the user pasted for one file -> {found: {...}}, or {error} (status 400)."""
+    body = await _body(request)
+    link, name = body.get("link"), body.get("name")
+    if not (isinstance(link, str) and isinstance(name, str)):
+        return web.json_response({"error": "link and name are needed"}, status=400)
+    try:
+        found = await asyncio.get_running_loop().run_in_executor(None, core.civitai_resolve, link, name,
+                                                                 core.civitai_token())
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"found": found})
 
 
 @routes.post("/missing_models/download")

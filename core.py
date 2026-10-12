@@ -1,6 +1,8 @@
 """Pure logic for the Missing models extension (no ComfyUI imports, so it can be unit-tested)."""
 import json
 import os
+import re
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -61,8 +63,17 @@ def collect(workflow: dict) -> list[dict]:
 HF_PREFIX = "https://huggingface.co/"
 
 
+CIVITAI = "https://civitai.com/"
+CIVITAI_DOWNLOAD = CIVITAI + "api/download/models/"
+CIVITAI_API = CIVITAI + "api/v1/"
+
+
 def allowed(url) -> bool:
-    return isinstance(url, str) and url.startswith(HF_PREFIX)
+    return isinstance(url, str) and url.startswith((HF_PREFIX, CIVITAI_DOWNLOAD))
+
+
+def is_civitai(url) -> bool:
+    return isinstance(url, str) and url.startswith(CIVITAI_DOWNLOAD)
 
 
 def safe_name(name: str) -> str:
@@ -110,20 +121,42 @@ class Cancelled(RuntimeError):
     pass
 
 
-def token(config_path=ROOT / "config.json") -> str | None:
-    """Hugging Face token: env HF_TOKEN, else the file config.json names, else hf_token.txt next to this file
-    (never logged or sent to the browser)."""
-    if os.environ.get("HF_TOKEN"):
-        return os.environ["HF_TOKEN"].strip()
+DEFAULT_CIVITAI_TOKEN_FILE = ROOT / "civitai_token.txt"
+
+
+def _read_token(env_names, cfg_key, default_file, config_path) -> str | None:
+    for env in env_names:
+        if os.environ.get(env):
+            return os.environ[env].strip()
     try:
         cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cfg = {}
     cfg = _dict(cfg)
     try:
-        return Path(cfg.get("hf_token_file") or DEFAULT_TOKEN_FILE).read_text(encoding="utf-8").strip() or None
+        return Path(cfg.get(cfg_key) or default_file).read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+def token(config_path=ROOT / "config.json") -> str | None:
+    """Hugging Face token: env HF_TOKEN, else the file config.json names, else hf_token.txt next to this file
+    (never logged or sent to the browser)."""
+    return _read_token(("HF_TOKEN",), "hf_token_file", DEFAULT_TOKEN_FILE, config_path)
+
+
+def civitai_token(config_path=ROOT / "config.json") -> str | None:
+    """Civitai API key: env CIVITAI_API_TOKEN (or CIVITAI_TOKEN), else config.json's civitai_token_file, else
+    civitai_token.txt next to this file (never logged or sent to the browser)."""
+    return _read_token(("CIVITAI_API_TOKEN", "CIVITAI_TOKEN"), "civitai_token_file", DEFAULT_CIVITAI_TOKEN_FILE,
+                       config_path)
+
+
+def token_for(url, hf: str | None, civitai: str | None) -> str | None:
+    """Each site gets only its own token."""
+    if is_civitai(url) or (isinstance(url, str) and url.startswith(CIVITAI_API)):
+        return civitai
+    return hf if isinstance(url, str) and url.startswith(HF_PREFIX) else None
 
 
 def repo_page(url: str) -> str:
@@ -132,20 +165,33 @@ def repo_page(url: str) -> str:
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Follow https redirects only, and send the token to huggingface.co only (not to its CDN or anywhere else):
-    urllib's default handler copies the Authorization header to every redirect target."""
+    """Follow https redirects only, and keep the token only while the redirect stays on the same site (not to
+    Hugging Face's or Civitai's CDN or anywhere else): urllib's default handler copies the Authorization header to
+    every redirect target."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urllib.parse.urlsplit(newurl)
         if target.scheme != "https":
             raise urllib.error.HTTPError(newurl, code, f"refused redirect to {target.scheme}", headers, fp)
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and target.hostname != "huggingface.co":
+        if new is not None and target.hostname != urllib.parse.urlsplit(req.full_url).hostname:
             new.remove_header("Authorization")
         return new
 
 
-_OPENER = urllib.request.build_opener(_SafeRedirect)
+def _tls() -> ssl.SSLContext:
+    """The system's CAs plus certifi's when installed (ComfyUI ships it): Windows' store can lack a root that a
+    site's chain needs (civitai.com: ISRG Root X2), and OpenSSL then fails on an expired cross-signed copy."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, OSError, ssl.SSLError):
+        pass
+    return ctx
+
+
+_OPENER = urllib.request.build_opener(_SafeRedirect, urllib.request.HTTPSHandler(context=_tls()))
 
 
 def _open(req, timeout=60):
@@ -157,6 +203,12 @@ def _request(url: str, tok: str | None, method: str = "GET") -> urllib.request.R
     if tok:
         req.add_header("Authorization", f"Bearer {tok}")
     return req
+
+
+def _gated_message(url: str) -> str:
+    if is_civitai(url):
+        return "Civitai needs your API key for this file: add one (see the README), then try again"
+    return f"Accept the license at {repo_page(url)}, then try again"
 
 
 def size(url: str, tok: str | None = None) -> int | None:
@@ -177,6 +229,8 @@ def download(url: str, dest, tok: str | None = None, progress=None, cancel=None)
     part = dest.with_name(dest.name + ".part")
     try:
         with _open(_request(url, tok), timeout=60) as r:
+            if (r.headers.get("Content-Type") or "").startswith("text/html"):   # a sign-in page, not a model
+                raise GatedError(_gated_message(url))
             total, done = int(r.headers.get("Content-Length") or 0), 0
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(part, "wb") as f:
@@ -192,7 +246,7 @@ def download(url: str, dest, tok: str | None = None, progress=None, cancel=None)
     except urllib.error.HTTPError as e:
         part.unlink(missing_ok=True)
         if e.code in (401, 403):
-            raise GatedError(f"Accept the license at {repo_page(url)}, then try again") from None
+            raise GatedError(_gated_message(url)) from None
         raise RuntimeError(f"HTTP {e.code} {e.reason}") from None
     except BaseException:
         part.unlink(missing_ok=True)
@@ -202,3 +256,100 @@ def download(url: str, dest, tok: str | None = None, progress=None, cancel=None)
         raise FileExistsError(f"{dest.name} already exists")
     part.replace(dest)
     return dest
+
+
+# ---- Civitai: find a missing file by exact name, or resolve a link the user pasted --------------------------
+# models folder -> Civitai model types, so a search isn't crowded out by other kinds of models
+CIVITAI_TYPES = {"loras": ["LORA", "LoCon", "DoRA"], "checkpoints": ["Checkpoint"], "vae": ["VAE"],
+                 "upscale_models": ["Upscaler"], "controlnet": ["Controlnet"], "embeddings": ["TextualInversion"]}
+_LINK = re.compile(r"https://(?:www\.)?civitai\.(?:com|green)/(?:api/download/models/(\d+)|models/(\d+))")
+
+
+def _get_json(url: str, tok: str | None = None):
+    try:
+        with _open(_request(url, tok), timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Civitai: HTTP {e.code} {e.reason}") from None
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"Civitai: {e}") from None
+
+
+def _base(name: str) -> str:
+    return name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _civitai_file(f, model_id, version_id) -> dict | None:
+    """A Civitai file entry as a download: url, size, Civitai's file name, and the model page."""
+    f = _dict(f)
+    url, fname = f.get("downloadUrl"), f.get("name")
+    if not (is_civitai(url) and isinstance(fname, str) and fname.lower().endswith(MODEL_EXTS)):
+        return None
+    kb = f.get("sizeKB")
+    page = f"{CIVITAI}models/{model_id}" + (f"?modelVersionId={version_id}" if version_id else "")
+    return {"url": url, "size": int(kb * 1024) if isinstance(kb, (int, float)) else None, "file": fname,
+            "page": page}
+
+
+def _queries(name: str) -> list[str]:
+    """Search words from a file name, most to least specific (Civitai searches model names, not file names):
+    juggernautXL_ragnarokBy_v2.safetensors -> "juggernaut xl ragnarok by v2", "juggernaut xl ragnarok by",
+    "juggernaut"."""
+    stem = name.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    stem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem).lower()          # camelCase -> camel case
+    words = re.sub(r"[_\-.\s]+", " ", stem).strip()
+    short = re.sub(r"(\s+(v|ver|version)?\s*\d[\w]*)+$", "", words).strip()
+    first = short.split(" ")[0] if short else ""
+    return [q for q in dict.fromkeys([words, short, first if len(first) >= 4 else ""]) if q]
+
+
+def civitai_find(name: str, directory: str, tok: str | None = None) -> dict | None:
+    """The Civitai file whose name is exactly this file's name (case aside), or None. Never a near miss: the
+    workflow needs that exact file."""
+    want = _base(name)
+    for q in _queries(name):
+        params = [("query", q), ("limit", "20")] + [("types", t) for t in CIVITAI_TYPES.get(directory, [])]
+        data = _get_json(CIVITAI_API + "models?" + urllib.parse.urlencode(params), tok)
+        for item in _list(_dict(data).get("items")):
+            item = _dict(item)
+            for v in _list(item.get("modelVersions")):
+                v = _dict(v)
+                for f in _list(v.get("files")):
+                    if isinstance(_dict(f).get("name"), str) and f["name"].lower() == want:
+                        hit = _civitai_file(f, item.get("id"), v.get("id"))
+                        if hit:
+                            return hit
+    return None
+
+
+def civitai_resolve(link: str, name: str, tok: str | None = None) -> dict:
+    """A Civitai model page or download link -> the file to save as `name`: the file with that exact name in it,
+    else the version's primary model file (newest version when the link names none). ValueError if it has none."""
+    link = (link or "").strip()
+    m = _LINK.match(link)
+    if not m:
+        raise ValueError("not a Civitai model link (https://civitai.com/models/...)")
+    version = m.group(1) or urllib.parse.parse_qs(urllib.parse.urlsplit(link).query).get("modelVersionId", [None])[0]
+    if version:
+        if not str(version).isdigit():
+            raise ValueError("not a Civitai model link")
+        v = _dict(_get_json(f"{CIVITAI_API}model-versions/{version}", tok))
+        model_id, versions = v.get("modelId"), [v]
+    else:
+        model_id = m.group(2)
+        versions = [_dict(v) for v in _list(_dict(_get_json(f"{CIVITAI_API}models/{model_id}", tok))
+                                            .get("modelVersions"))]
+    want = _base(name)
+    for v in versions:                       # the exact file, in any version the link covers
+        for f in _list(v.get("files")):
+            if isinstance(_dict(f).get("name"), str) and f["name"].lower() == want:
+                hit = _civitai_file(f, model_id, v.get("id"))
+                if hit:
+                    return hit
+    if versions:                             # else the version's main file
+        files = _list(versions[0].get("files"))
+        for f in sorted(files, key=lambda f: not _dict(f).get("primary")):
+            hit = _civitai_file(f, model_id, versions[0].get("id"))
+            if hit:
+                return hit
+    raise ValueError("no model file at that link")
