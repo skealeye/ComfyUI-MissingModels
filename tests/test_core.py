@@ -107,6 +107,15 @@ def test_token_env_then_config_file(tmp_path, monkeypatch):
     assert core.token(cfg) == "env"
 
 
+def test_token_falls_back_to_hf_token_txt_next_to_the_extension(tmp_path, monkeypatch):
+    assert core.DEFAULT_TOKEN_FILE == core.ROOT / "hf_token.txt"
+    monkeypatch.setattr(core, "DEFAULT_TOKEN_FILE", tmp_path / "hf_token.txt")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert core.token(tmp_path / "none.json") is None
+    (tmp_path / "hf_token.txt").write_text("hf_abc\r\n", encoding="utf-8")   # as install.bat writes it
+    assert core.token(tmp_path / "none.json") == "hf_abc"
+
+
 def test_download_part_then_rename_with_progress_and_token(tmp_path, monkeypatch):
     seen = {}
 

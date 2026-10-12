@@ -99,7 +99,7 @@ def missing(entries: list[dict], exists, known_dirs: set[str]) -> list[dict]:
     return out
 
 
-DEFAULT_TOKEN_FILE = r"Z:\Git\SlopFactory\.hf_token"
+DEFAULT_TOKEN_FILE = ROOT / "hf_token.txt"   # install.bat can write it; gitignored
 
 
 class GatedError(RuntimeError):
@@ -111,7 +111,8 @@ class Cancelled(RuntimeError):
 
 
 def token(config_path=ROOT / "config.json") -> str | None:
-    """Hugging Face token: env HF_TOKEN, else the file config.json names (never logged or sent to the browser)."""
+    """Hugging Face token: env HF_TOKEN, else the file config.json names, else hf_token.txt next to this file
+    (never logged or sent to the browser)."""
     if os.environ.get("HF_TOKEN"):
         return os.environ["HF_TOKEN"].strip()
     try:
